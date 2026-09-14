@@ -7,7 +7,7 @@ import os
 AUDAR_DIR = "/app/Audar-TTS-V1"
 REF_WAV = "/app/demo_male_3_source.wav"
 
-# النص المطابق لملف demo_male_3 المرجعي
+# Reference text for the selected demo_male_3 voice
 REF_TEXT = os.environ.get("AUDAR_REF_TEXT", "")
 
 
@@ -16,10 +16,14 @@ def handler(job):
     text = job_input.get("text", "").strip()
 
     if not text:
-        return {"error": "No text provided"}
+        return {
+            "error": "No text provided"
+        }
 
     if not REF_TEXT:
-        return {"error": "AUDAR_REF_TEXT is not configured"}
+        return {
+            "error": "AUDAR_REF_TEXT is not configured"
+        }
 
     with tempfile.TemporaryDirectory() as temp_dir:
         output_file = os.path.join(temp_dir, "output.wav")
@@ -30,7 +34,7 @@ def handler(job):
             text,
             "--ref", REF_WAV,
             "--ref-text", REF_TEXT,
-            "--tier", "turbo",
+            "--iter", "turbo",
             "--gpu-layers", "-1",
             "--out", output_file,
         ]
@@ -49,10 +53,14 @@ def handler(job):
             }
 
         if not os.path.exists(output_file):
-            return {"error": "Output WAV was not created"}
+            return {
+                "error": "Output WAV was not created"
+            }
 
         with open(output_file, "rb") as audio_file:
-            audio_base64 = base64.b64encode(audio_file.read()).decode("utf-8")
+            audio_base64 = base64.b64encode(
+                audio_file.read()
+            ).decode("utf-8")
 
         return {
             "audio_base64": audio_base64,
@@ -62,4 +70,5 @@ def handler(job):
         }
 
 
-runpod.serverless.start({"handler": handler})
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
