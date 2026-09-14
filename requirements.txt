@@ -1,0 +1,6 @@
+runpod
+huggingface_hub
+neucodec
+soundfile
+torch
+librosa
