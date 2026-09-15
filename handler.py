@@ -34,7 +34,7 @@ def handler(job):
             text,
             "--ref", REF_WAV,
             "--ref-text", REF_TEXT,
-            "--iter", "turbo",
+            "--tier", "turbo",
             "--gpu-layers", "-1",
             "--out", output_file,
         ]
