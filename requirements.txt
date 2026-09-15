@@ -1,6 +1,10 @@
 runpod
 huggingface_hub
-neucodec
-soundfile
-torch
-librosa
+neucodec==0.0.6
+soundfile==0.13.1
+librosa==0.11.0
+
+torch==2.8.0
+torchaudio==2.8.0
+torchao==0.13.0
+torchtune==0.6.1
