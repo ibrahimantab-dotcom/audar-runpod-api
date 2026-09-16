@@ -21,6 +21,8 @@ WORKDIR /app
 
 RUN git clone --depth 1 https://github.com/AudarAI/Audar-TTS-V1.git /app/Audar-TTS-V1
 
+RUN sed -i 's/\.cpu()\.numpy()\[0, 0, :\]/.detach().cpu().numpy()[0, 0, :]/' /app/Audar-TTS-V1/examples/synthesize_gguf.py
+
 COPY requirements.txt /app/requirements.txt
 
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel && \
