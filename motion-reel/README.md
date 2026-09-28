@@ -19,10 +19,17 @@ Every frame is a pure function of time (`renderFrame(i)`), so playback and expor
 - `motion-reel.mp4`: the rendered H.264 file, 60 fps.
 - `index.html`: open in a browser for live playback with pause and frame scrubbing.
 
+## Arabic version
+
+- `motion-reel-ar.mp4` and `ar.html`: the same reel in Arabic, set in Lalezar and IBM Plex Sans Arabic.
+- Arabic letters join, so words are never split into letters. Each word is rendered once as a sprite and animated in vertical strips, right to left, which keeps the shaping intact.
+- Motion, wipes, the HUD and the progress bar are mirrored to read right to left.
+
 ## Re-render
 
 ```bash
 npm i -D playwright          # or reuse a global install
 node render.mjs              # writes motion-reel.mp4 (needs ffmpeg with libx264 on PATH, or FFMPEG=/path/to/ffmpeg)
+node render.mjs --page ar.html       # writes motion-reel-ar.mp4
 node render.mjs --frames 0,300,600   # writes PNG stills instead
 ```

@@ -1,0 +1,653 @@
+<title>ريل الحركة ٢٦</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lalezar&family=IBM+Plex+Sans+Arabic:wght@500;600&family=DM+Mono:wght@500&display=swap">
+<style>
+  /* Layout: one 16:9 stage centered on a dark field, a slim right-to-left transport bar beneath it. Single dark look by choice. */
+  :root {
+    --field: #07060F;
+    --ink: #0E0D1A;
+    --paper: #F2EDFF;
+    --pink: #FF2E88;
+    --sun: #FFC62B;
+    --muted: #8C87A8;
+    --ui: 'IBM Plex Sans Arabic', Tahoma, sans-serif;
+    --mono: 'DM Mono', ui-monospace, Menlo, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--field);
+    color: var(--paper);
+    font-family: var(--ui);
+    display: grid;
+    place-items: center;
+    padding-inline: 16px;
+    padding-block: 16px;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+  .wrap { width: min(100%, calc((100vh - 96px) * 16 / 9)); display: grid; gap: 12px; }
+  canvas { width: 100%; height: auto; aspect-ratio: 16 / 9; max-width: 100%; display: block; background: var(--ink); border-radius: 6px; }
+  .bar { display: flex; align-items: center; gap: 14px; font-size: 14px; color: var(--muted); }
+  .bar button {
+    font: inherit; font-weight: 600; color: var(--paper); background: transparent; border: 1px solid var(--muted);
+    border-radius: 999px; padding: 5px 16px; cursor: pointer;
+  }
+  .bar button:hover { border-color: var(--paper); }
+  .bar button:focus-visible, #scrub:focus-visible { outline: 2px solid var(--sun); outline-offset: 2px; }
+  #scrub { flex: 1; min-width: 0; accent-color: var(--pink); direction: rtl; }
+  #tc { font-family: var(--mono); font-variant-numeric: tabular-nums; min-width: 7ch; text-align: left; }
+  body.capture { padding: 0; background: var(--ink); }
+  body.capture .wrap { width: 1920px; }
+  body.capture .bar { display: none; }
+  body.capture canvas { border-radius: 0; }
+</style>
+
+<div class="wrap">
+  <canvas id="c" width="1920" height="1080" aria-label="ريل موشن جرافيك مدته ١٥ ثانية"></canvas>
+  <div class="bar" dir="rtl">
+    <button id="play" type="button">إيقاف</button>
+    <input id="scrub" type="range" min="0" max="900" step="1" value="0" aria-label="التنقل في الخط الزمني">
+    <span id="tc" dir="ltr">0.00s</span>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+const W = 1920, H = 1080, FPS = 60, DUR = 15, TAU = Math.PI * 2;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+
+const C = {
+  ink: '#0E0D1A', deep: '#110A30', paper: '#F2EDFF',
+  blue: '#3D5AFE', pink: '#FF2E88', sun: '#FFC62B', mint: '#2BF5C0',
+};
+const PAL = [C.sun, C.pink, C.blue, C.mint];
+const DISPLAY = "Lalezar, 'Noto Kufi Arabic', Tahoma, sans-serif";
+const UI = "'IBM Plex Sans Arabic', Tahoma, sans-serif";
+const MONO = "'DM Mono', ui-monospace, Menlo, monospace";
+window.REEL_FONTS = [["400 100px Lalezar", 'حركة ٠١٢٣٤٥٦٧٨٩'], ["600 20px 'IBM Plex Sans Arabic'", 'حركة ٠١٢٣'], ["500 20px 'IBM Plex Sans Arabic'", 'حركة'], ["500 20px 'DM Mono'", '0123:']];
+const AR_DIGITS = '٠١٢٣٤٥٦٧٨٩';
+const ar = s => String(s).replace(/[0-9]/g, d => AR_DIGITS[d]);
+
+// ---------- math ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const P = (t, a, b) => clamp((t - a) / (b - a));
+const frac = x => x - Math.floor(x);
+const E = {
+  outExpo: t => t >= 1 ? 1 : 1 - Math.pow(2, -10 * t),
+  inExpo: t => t <= 0 ? 0 : Math.pow(2, 10 * t - 10),
+  inOutExpo: t => t <= 0 ? 0 : t >= 1 ? 1 : t < .5 ? Math.pow(2, 20 * t - 10) / 2 : (2 - Math.pow(2, -20 * t + 10)) / 2,
+  outBack: t => { const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); },
+  inBack: t => { const c1 = 1.70158, c3 = c1 + 1; return c3 * t * t * t - c1 * t * t; },
+  outElastic: t => t <= 0 ? 0 : t >= 1 ? 1 : Math.pow(2, -10 * t) * Math.sin((t * 10 - .75) * (TAU / 3)) + 1,
+  outCubic: t => 1 - Math.pow(1 - t, 3),
+  inCubic: t => t * t * t,
+};
+function rng(seed) {
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ---------- drawing helpers ----------
+function fill(c) { ctx.fillStyle = c; ctx.fillRect(-200, -200, W + 400, H + 400); }
+function circle(x, y, r, c) { if (r <= 0) return; ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
+function ring(x, y, r, lw, c) { if (r <= 0 || lw <= 0) return; ctx.strokeStyle = c; ctx.lineWidth = lw; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.stroke(); }
+function clipped(path, draw, evenodd) {
+  ctx.save(); ctx.beginPath(); path(); ctx.clip(evenodd ? 'evenodd' : 'nonzero'); draw(); ctx.restore();
+}
+function font(px, fam = DISPLAY, w = 400) { ctx.font = `${w} ${px}px ${fam}`; }
+// Draws text with an explicit direction so mixed Arabic/Latin strings keep their order.
+function text(str, x, y, align = 'right', dir = 'rtl') {
+  ctx.direction = dir; ctx.textAlign = align; ctx.fillText(str, x, y);
+  ctx.direction = 'ltr'; ctx.textAlign = 'left';
+}
+
+// Arabic letters join, so words are never split into letters. Each word is rendered
+// once into a sprite; animations move vertical strips of that sprite instead.
+const sprites = new Map();
+function sprite(str, px, color, fam = DISPLAY) {
+  const key = str + px + color + fam;
+  if (sprites.has(key)) return sprites.get(key);
+  font(px, fam); ctx.direction = 'rtl';
+  const m = ctx.measureText(str);
+  const pad = Math.ceil(px * .08);
+  const asc = Math.ceil(m.actualBoundingBoxAscent) + pad, desc = Math.ceil(m.actualBoundingBoxDescent) + pad;
+  const w = Math.ceil(m.actualBoundingBoxLeft + m.actualBoundingBoxRight) + pad * 2;
+  const c = document.createElement('canvas'); c.width = w; c.height = asc + desc;
+  const g = c.getContext('2d');
+  g.font = `400 ${px}px ${fam}`; g.direction = 'rtl'; g.textAlign = 'left'; g.fillStyle = color;
+  g.fillText(str, pad + m.actualBoundingBoxLeft, asc);
+  ctx.direction = 'ltr';
+  const s = { c, w, h: asc + desc, asc };
+  sprites.set(key, s); return s;
+}
+// Draw a sprite centered at cx with its baseline at y, split into n strips.
+// fn(k, n) receives k counted from the RIGHT edge (reading order) and returns {dx, dy, a}.
+function strips(s, cx, y, n, fn) {
+  const sw = s.w / n, x0 = cx - s.w / 2;
+  for (let i = 0; i < n; i++) {
+    const o = fn(n - 1 - i, n); if (!o || o.a <= 0) continue;
+    ctx.globalAlpha = o.a;
+    ctx.drawImage(s.c, i * sw, 0, sw + .6, s.h, x0 + i * sw + (o.dx || 0), y - s.asc + (o.dy || 0), sw + .6, s.h);
+  }
+  ctx.globalAlpha = 1;
+}
+function blobPath(cx, cy, R, seed, t, amp = 1) {
+  const n = 120;
+  for (let i = 0; i <= n; i++) {
+    const a = i / n * TAU;
+    const r = R * (1 + amp * (0.11 * Math.sin(3 * a + t * 1.4 + seed)
+      + 0.07 * Math.sin(5 * a - t * 2.2 + seed * 2.1)
+      + 0.04 * Math.sin(8 * a + t * 3.1 + seed * .7)));
+    const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.closePath();
+}
+function marquee(str, y, px, speed, t, color, stroke) {
+  font(px); ctx.direction = 'rtl'; ctx.textAlign = 'left';
+  const w = ctx.measureText(str).width;
+  let x = -frac((t * speed) / w) * w;
+  if (stroke) { ctx.strokeStyle = color; ctx.lineWidth = stroke; } else ctx.fillStyle = color;
+  for (; x < W + w; x += w) stroke ? ctx.strokeText(str, x, y) : ctx.fillText(str, x, y);
+  ctx.direction = 'ltr';
+}
+
+// ---------- precomputed randomness ----------
+const r1 = rng(7);
+const burst = Array.from({ length: 56 }, (_, i) => ({ a: i / 56 * TAU + r1() * .2, s: 260 + r1() * 620, w: 2 + r1() * 6, c: PAL[i % 4] }));
+const r2 = rng(42);
+const stars = Array.from({ length: 260 }, () => ({ x: r2() * 2 - 1, y: r2() * 2 - 1, z: r2(), c: r2() < .15 ? C.pink : r2() < .3 ? C.mint : C.paper }));
+const r3 = rng(99);
+const confetti = Array.from({ length: 90 }, (_, i) => {
+  const a = -Math.PI / 2 + (r3() - .5) * 2.6;
+  const s = 700 + r3() * 1300;
+  return { vx: Math.cos(a) * s, vy: Math.sin(a) * s, rot: r3() * TAU, vr: (r3() - .5) * 18, w: 10 + r3() * 16, h: 6 + r3() * 8, c: PAL[i % 4], drag: .6 + r3() * .8 };
+});
+const grain = Array.from({ length: 6 }, (_, k) => {
+  const g = document.createElement('canvas'); g.width = g.height = 256;
+  const gx = g.getContext('2d'); const id = gx.createImageData(256, 256); const r = rng(500 + k);
+  for (let i = 0; i < id.data.length; i += 4) { const v = r() * 255 | 0; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+  gx.putImageData(id, 0, 0); return g;
+});
+
+// ---------- camera shake ----------
+const HITS = [[1.38, 22], [3.9, 14], [6.02, 12], [8.48, 26], [9.3, 10], [10.58, 14], [10.94, 9], [11.33, 9], [11.72, 9], [12.11, 12], [13.34, 30]];
+function shake(t) {
+  let x = 0, y = 0, amp = 0;
+  for (const [h, A] of HITS) {
+    const d = t - h; if (d < 0 || d > .6) continue;
+    const a = A * Math.exp(-d * 11);
+    x += a * Math.sin(d * 95 + h * 7); y += a * Math.cos(d * 81 + h * 3); amp += a;
+  }
+  return { x, y, amp };
+}
+
+// ================= ١ · النشأة (0 – 1.9) =================
+function s1(t) {
+  fill(C.ink);
+  const cx = W / 2, cy = H / 2;
+  const pop = E.outElastic(P(t, 0.04, 0.8));
+  const split = E.outExpo(P(t, 0.34, 0.95));
+  const col = E.inBack(P(t, 0.92, 1.36));
+  const R = 280 * split * (1 - col);
+  // counter-clockwise spin: the orbit reads right to left
+  const spin = -(t * 2.4 + E.inExpo(P(t, 0.7, 1.36)) * 7);
+  if (R > 2) {
+    ctx.strokeStyle = 'rgba(242,237,255,.18)'; ctx.lineWidth = 2;
+    for (let i = 0; i < 72; i++) {
+      const a = i / 72 * TAU - spin * .3, l = i % 6 ? 8 : 22;
+      ctx.beginPath(); ctx.moveTo(cx + Math.cos(a) * (R + 40), cy + Math.sin(a) * (R + 40));
+      ctx.lineTo(cx + Math.cos(a) * (R + 40 + l), cy + Math.sin(a) * (R + 40 + l)); ctx.stroke();
+    }
+  }
+  const dr = 36 * pop * (1 - col * .4);
+  if (t < 0.36) circle(cx, cy, dr, C.paper);
+  else {
+    ctx.lineCap = 'round';
+    for (let i = 0; i < 4; i++) {
+      const a = spin + i * TAU / 4;
+      if (R > 2) {
+        const len = 0.4 + 1.1 * split * (0.5 + 0.5 * E.inExpo(P(t, 0.7, 1.3)));
+        ctx.strokeStyle = PAL[i]; ctx.globalAlpha = .9; ctx.lineWidth = dr * 1.1;
+        ctx.beginPath(); ctx.arc(cx, cy, R, a, a + len); ctx.stroke(); ctx.globalAlpha = 1;
+      }
+      circle(cx + Math.cos(a) * R, cy + Math.sin(a) * R, dr, PAL[i]);
+    }
+  }
+  const b = P(t, 1.36, 1.95);
+  if (b > 0) {
+    const e = E.outExpo(b);
+    ctx.lineCap = 'round';
+    for (const p of burst) {
+      const d1 = e * p.s, d0 = d1 * lerp(.2, .85, b);
+      ctx.strokeStyle = p.c; ctx.lineWidth = p.w * (1 - b); ctx.globalAlpha = 1 - b;
+      ctx.beginPath(); ctx.moveTo(cx + Math.cos(p.a) * d0, cy + Math.sin(p.a) * d0);
+      ctx.lineTo(cx + Math.cos(p.a) * d1, cy + Math.sin(p.a) * d1); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    circle(cx, cy, 60 * (1 - E.outCubic(P(t, 1.36, 1.5))), C.paper);
+  }
+}
+
+// ================= ٢ · الخط المتحرك (1.4 – 3.9) =================
+function badge(t, x, y) {
+  const s = E.outBack(P(t, 2.25, 2.75)) * (1 - E.inBack(P(t, 3.15, 3.4)));
+  if (s <= 0) return;
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  circle(0, 0, 128, C.pink);
+  ctx.save(); ctx.rotate(-t * 1.4);
+  ctx.fillStyle = C.ink;
+  for (let i = 0; i < 24; i++) {
+    ctx.save(); ctx.rotate(i / 24 * TAU); ctx.translate(0, -108);
+    if (i % 6 === 0) { ctx.beginPath(); for (let k = 0; k < 8; k++) { const r = k % 2 ? 3 : 9, a = k / 8 * TAU; ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r); } ctx.fill(); }
+    else ctx.fillRect(-2, -5, 4, 10);
+    ctx.restore();
+  }
+  ctx.restore();
+  ctx.rotate(Math.sin(t * 3) * .08);
+  ctx.fillStyle = C.ink;
+  font(58); text('متاح', 0, -2, 'center');
+  font(24, UI, 600); text('للمشاريع', 0, 34, 'center');
+  font(18, MONO, 500); text('2026', 0, 62, 'center', 'ltr');
+  ctx.restore();
+}
+function s2(t) {
+  fill(C.sun);
+  ctx.textBaseline = 'alphabetic';
+  const band = E.outExpo(P(t, 1.5, 2.0));
+  ctx.save(); ctx.globalAlpha = band;
+  ctx.fillStyle = C.ink; ctx.fillRect(W * (1 - band), 60, W * band, 70); ctx.fillRect(0, H - 130, W * band, 70);
+  clipped(() => ctx.rect(0, 60, W, 70), () => marquee('معرض أعمال ✦ تصميم موشن ✦ ٦٠ إطارًا في الثانية ✦ ', 116, 46, -380, t, C.sun));
+  clipped(() => ctx.rect(0, H - 130, W, 70), () => marquee('إطارات مفتاحية ✦ تسارع ✦ توقيت ✦ مسافات ✦ ', H - 74, 46, 380, t, C.sun));
+  ctx.restore();
+
+  // big word, revealed in strips from the right
+  const s = sprite('حركة', 470, C.ink);
+  const punch = 1 + .07 * Math.sin(P(t, 2.3, 2.62) * Math.PI);
+  const base = 620;
+  ctx.save();
+  ctx.translate(W / 2, base - 150); ctx.scale(punch, punch); ctx.translate(-W / 2, -(base - 150));
+  clipped(() => ctx.rect(0, base - s.asc, W, s.h), () => {
+    strips(s, W / 2, base, 16, (k, n) => {
+      const d = k * .02;
+      const a = E.outExpo(P(t, 1.5 + d, 2.1 + d));
+      const o = E.inExpo(P(t, 3.1 + d * .5, 3.45 + d * .5));
+      return { dy: (1 - a) * s.h - o * s.h, a: 1 };
+    });
+  });
+  ctx.restore();
+
+  const rev = E.inOutExpo(P(t, 2.1, 2.7)), out = E.inExpo(P(t, 3.05, 3.45));
+  clipped(() => ctx.rect(W * (1 - rev) , 700, W * rev * (1 - out), 170), () => marquee('هي كل شيء — هي كل شيء — ', 840, 130, -520, t, C.ink, 3));
+
+  badge(t, 190, 265);
+}
+
+// ================= ٣ · الأنظمة (3.4 – 6.3) =================
+const COLS = 14, ROWS = 8, CELL = 118;
+function drawGrid(t, mono) {
+  const gx = W / 2 - COLS * CELL / 2 + CELL / 2, gy = H / 2 - ROWS * CELL / 2 + CELL / 2;
+  const maxD = Math.hypot(COLS / 2, ROWS / 2);
+  for (let j = 0; j < ROWS; j++) for (let i = 0; i < COLS; i++) {
+    const dx = i - (COLS - 1) / 2, dy = j - (ROWS - 1) / 2;
+    const d = Math.hypot(dx, dy) / maxD;
+    const a = E.outBack(P(t, 3.6 + d * .4, 4.1 + d * .4));
+    const e = E.inBack(P(t, 5.45 + (1 - d) * .3, 5.8 + (1 - d) * .3));
+    const ph = d * 10 - t * 5.5 - Math.atan2(dy, dx);
+    const s = CELL * .78 * a * (1 - e) * (.55 + .45 * Math.sin(ph));
+    if (s <= .5) continue;
+    const rad = s / 2 * (.5 + .5 * Math.sin(ph * .7 + t * 2.4));
+    const band = ((Math.floor(d * 7 - t * 3.2) % 4) + 4) % 4;
+    ctx.save(); ctx.translate(gx + i * CELL, gy + j * CELL); ctx.rotate(-ph * .4);
+    ctx.fillStyle = mono ? C.ink : PAL[band];
+    ctx.beginPath(); ctx.roundRect(-s / 2, -s / 2, s, s, rad); ctx.fill();
+    ctx.restore();
+  }
+}
+function s3(t) {
+  fill(C.ink);
+  drawGrid(t, false);
+  const lr = 230 * E.outBack(P(t, 4.2, 4.75)) * (1 - E.inBack(P(t, 5.3, 5.65)));
+  if (lr > 1) {
+    const lx = W / 2 - 470 * Math.sin(t * 1.9), ly = H / 2 + 230 * Math.sin(t * 2.7 + 1);
+    clipped(() => ctx.arc(lx, ly, lr, 0, TAU), () => {
+      fill(C.paper);
+      ctx.translate(lx, ly); ctx.scale(1.5, 1.5); ctx.translate(-lx, -ly);
+      drawGrid(t, true);
+    });
+    ring(lx, ly, lr + 14, 3, C.paper);
+    font(22, UI, 600); ctx.fillStyle = C.paper;
+    text(`تكبير ×${ar('1.5').replace('.', '٫')} · نصف القطر ${ar(Math.round(lr))}`, lx - lr - 28, ly - lr * .7, 'right');
+  }
+}
+
+// ================= ٤ · الانسياب (5.85 – 8.5) =================
+function s4(t) {
+  fill(C.paper);
+  const cx = W / 2, cy = H / 2;
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(-t * .6);
+  ctx.setLineDash([4, 16]); ring(0, 0, 450 * E.outExpo(P(t, 6.1, 6.9)), 3, C.ink); ctx.setLineDash([]);
+  ctx.restore();
+  ctx.globalCompositeOperation = 'multiply';
+  const cols = [C.blue, C.pink, C.sun, C.mint];
+  for (let k = 0; k < 4; k++) {
+    const g = E.outElastic(P(t, 6.0 + k * .09, 7.3 + k * .09));
+    const a = -t * .9 + k * TAU / 4;
+    ctx.fillStyle = cols[k];
+    ctx.beginPath(); blobPath(cx + Math.cos(a) * 150, cy + Math.sin(a) * 100, (300 - k * 30) * g, k * 1.7, t * 1.3, 1.3); ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  for (let k = 0; k < 3; k++) {
+    const a = t * 1.8 + k * TAU / 3, s = E.outBack(P(t, 6.4 + k * .1, 6.9 + k * .1));
+    circle(cx + Math.cos(a) * 450 * s, cy + Math.sin(a) * 450 * s, 16 * s, C.ink);
+  }
+  // liquid word: thin strips ride a travelling wave, entering from the right
+  const s = sprite('انسياب', 290, '#ffffff');
+  ctx.globalCompositeOperation = 'difference';
+  strips(s, cx, cy + 95, 72, (k, n) => {
+    const a = E.outBack(P(t, 6.3 + k * .007, 6.8 + k * .007));
+    return { dy: Math.sin(t * 6 + k * .16) * 22 + (1 - a) * 90, a: clamp(a * 1.5) };
+  });
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = C.ink; ctx.globalAlpha = E.outCubic(P(t, 6.8, 7.2));
+  font(22, MONO, 500); text('r(θ) = R(1 + Σ aₙ sin(nθ + φt))', 80, H - 90, 'left', 'ltr');
+  font(24, UI, 600); text('كتل عضوية · ٤ طبقات · مزج بالضرب', W - 80, H - 90);
+  ctx.globalAlpha = 1;
+}
+
+// ================= ٥ · الفضاء السريع (8.05 – 10.85) =================
+function tunnelCenter(t, d) {
+  return [W / 2 - 260 * Math.sin(1.3 * (t + d * 1.2)) * d, H / 2 + 150 * Math.sin(1.7 * (t + d * 1.2) + 1) * d];
+}
+function s5(t) {
+  fill(C.deep);
+  const speed = .55 + E.inExpo(P(t, 9.9, 10.8)) * 1.5;
+  const T = t * speed + E.outExpo(P(t, 8.05, 8.8)) * .8;
+  ctx.lineCap = 'round';
+  const [scx, scy] = tunnelCenter(t, 0);
+  for (const s of stars) {
+    const z = frac(s.z - T * 1.3) + .02, z2 = z + .05 + speed * .03;
+    const x1 = scx + s.x * 260 / z, y1 = scy + s.y * 260 / z;
+    const x2 = scx + s.x * 260 / z2, y2 = scy + s.y * 260 / z2;
+    ctx.strokeStyle = s.c; ctx.globalAlpha = clamp((1 - z) * 1.5); ctx.lineWidth = 3.2 / z * .4;
+    ctx.beginPath(); ctx.moveTo(x2, y2); ctx.lineTo(x1, y1); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  const N = 26, list = [];
+  for (let i = 0; i < N; i++) list.push([frac(i / N - T * .6), i]);
+  list.sort((a, b) => b[0] - a[0]);
+  for (const [d, i] of list) {
+    const dd = d + .035, size = 120 / dd;
+    const al = clamp((1 - d) * 2.4) * clamp(d * 10);
+    if (al <= 0 || size > 5000) continue;
+    const [x, y] = tunnelCenter(t, d);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(i * .5 + t * (i % 2 ? 1.1 : -1.1));
+    ctx.globalAlpha = al; ctx.strokeStyle = PAL[i % 4]; ctx.lineWidth = Math.max(1.5, size * .028);
+    ctx.beginPath();
+    if (i % 3 === 0) ctx.rect(-size, -size, size * 2, size * 2);
+    else if (i % 3 === 1) ctx.arc(0, 0, size, 0, TAU);
+    else for (let k = 0; k < 6; k++) { const a = k / 6 * TAU; ctx.lineTo(Math.cos(a) * size, Math.sin(a) * size); }
+    ctx.closePath(); ctx.stroke(); ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+  const fl = 1 - E.outCubic(P(t, 8.45, 8.95));
+  if (fl > 0) { ctx.globalAlpha = fl; fill(C.pink); ctx.globalAlpha = 1; }
+  // ٠ → ٦٠ counter, number on the right and its label on the left (reading order)
+  const cin = E.outBack(P(t, 9.15, 9.55)), cout = E.inExpo(P(t, 10.3, 10.6));
+  if (cin > 0 && cout < 1) {
+    const n = Math.round(E.outExpo(P(t, 9.15, 9.95)) * 60);
+    ctx.save(); ctx.translate(W / 2, H / 2); const s = cin * (1 + cout * 2.5); ctx.scale(s, s);
+    ctx.globalAlpha = 1 - cout;
+    font(420); ctx.textBaseline = 'middle';
+    const txt = ar(String(n).padStart(2, '0'));
+    const nx = 170;
+    const sp = 6 + 16 * Math.exp(-(t - 9.3) * 6) * (t > 9.3 ? 1 : 0);
+    ctx.globalCompositeOperation = 'screen';
+    ctx.fillStyle = C.pink; text(txt, nx - sp, 20, 'center');
+    ctx.fillStyle = C.mint; text(txt, nx + sp, 20, 'center');
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = C.paper; text(txt, nx, 20, 'center');
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = 'rgba(14,13,26,.82)'; ctx.beginPath(); ctx.roundRect(-400, -150, 380, 272, 18); ctx.fill();
+    font(120); ctx.fillStyle = C.sun; text('إطار/ث', -44, -30, 'right');
+    font(26, UI, 600); ctx.fillStyle = C.paper;
+    text('١٦٫٦٧ ملّي ثانية لكل إطار', -48, 36, 'right');
+    text('٩٠٠ إطار في ١٥ ثانية', -48, 80, 'right');
+    ctx.restore();
+  }
+}
+
+// ================= ٦ · الإيقاع (10.55 – 12.9) =================
+const BEAT0 = 10.55, BEAT = .39;
+const BEATS = [
+  ['تصميم', C.pink, C.ink], ['إيقاع', C.ink, C.sun], ['طاقة', C.sun, C.ink],
+  ['إتقان', C.blue, C.paper], ['تأثير', C.mint, C.ink],
+];
+function drawBeat(k, t) {
+  const [word, bg, fg] = BEATS[k], sk = BEAT0 + k * BEAT;
+  fill(bg);
+  font(100); ctx.direction = 'rtl'; const w100 = ctx.measureText(word).width; ctx.direction = 'ltr';
+  const px = Math.min(520, 100 * W * .72 / w100);
+  const zoom = lerp(1.1, 1, E.outExpo(P(t, sk, sk + BEAT)));
+  ctx.save(); ctx.translate(W / 2, H / 2); ctx.scale(zoom, zoom);
+  font(px); ctx.textBaseline = 'middle'; ctx.direction = 'rtl'; ctx.textAlign = 'center';
+  ctx.globalAlpha = .35; ctx.strokeStyle = fg; ctx.lineWidth = 2;
+  for (const o of [-1, 1]) ctx.strokeText(word, -o * (t - sk) * 300, o * px * .9);
+  ctx.globalAlpha = 1;
+  const top = -px * .6, h = px * 1.2, n = 7;
+  for (let j = 0; j < n; j++) {
+    const off = (j % 2 ? -1 : 1) * (1 - E.outExpo(P(t, sk + j * .012, sk + .3))) * W * .7;
+    clipped(() => ctx.rect(-W, top + h * j / n, W * 2, h / n + 1), () => { ctx.fillStyle = fg; ctx.fillText(word, off, 0); });
+  }
+  ctx.restore(); ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic'; ctx.direction = 'ltr';
+  // beat pips, filling right to left
+  for (let i = 0; i < BEATS.length; i++) {
+    ctx.fillStyle = fg; ctx.globalAlpha = i === k ? 1 : .3;
+    ctx.fillRect(W / 2 + 76 - i * 46, H - 150, 34, 6);
+  }
+  ctx.globalAlpha = 1;
+}
+function stripes(p, n, stag) {
+  const h = H / n;
+  for (let i = 0; i < n; i++) {
+    const e = E.outExpo(clamp((p - i * stag) / (1 - (n - 1) * stag)));
+    const w = W * e;
+    ctx.rect(i % 2 ? 0 : W - w, i * h, w, h + 1);
+  }
+}
+function s6(t) {
+  const k = clamp(Math.floor((t - BEAT0) / BEAT), 0, BEATS.length - 1);
+  if (k === 0) { drawBeat(0, t); return; }
+  const sk = BEAT0 + k * BEAT;
+  drawBeat(k - 1, sk);
+  clipped(() => stripes(P(t, sk, sk + .2), 9, .03), () => drawBeat(k, t));
+}
+
+// ================= ٧ · التوقيع (12.5 – 15) =================
+function s7(t) {
+  fill(C.ink);
+  const mx = W / 2, my = H / 2 - 130, SNAP = 13.34;
+  const shapes = [
+    { from: [1100, -600], to: [92, 10], c: C.sun, k: 0 },
+    { from: [-1100, 500], to: [-88, 10], c: C.pink, k: 1 },
+    { from: [0, -900], to: [0, -52], c: C.blue, k: 2 },
+  ];
+  const settle = t - SNAP;
+  ctx.globalCompositeOperation = 'screen';
+  for (const s of shapes) {
+    const e = E.outExpo(P(t, 12.7 + s.k * .08, SNAP));
+    const bob = settle > 0 ? Math.sin(settle * 3 + s.k * 2) * 6 : 0;
+    const x = mx + lerp(s.from[0], s.to[0], e), y = my + lerp(s.from[1], s.to[1], e) + bob;
+    const rot = (1 - e) * TAU * 1.5 * (s.k % 2 ? 1 : -1);
+    const sc = settle > 0 ? 1 + .12 * Math.exp(-settle * 8) * Math.sin(settle * 40) : 1;
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.scale(sc, sc); ctx.fillStyle = s.c; ctx.beginPath();
+    if (s.k === 0) ctx.arc(0, 0, 100, 0, TAU);
+    else if (s.k === 1) ctx.roundRect(-94, -94, 188, 188, 20);
+    else { ctx.moveTo(0, -120); ctx.lineTo(110, 70); ctx.lineTo(-110, 70); ctx.closePath(); }
+    ctx.fill(); ctx.restore();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  if (settle > 0) {
+    const e = E.outExpo(P(settle, 0, .8));
+    ring(mx, my, 150 + e * 900, 26 * (1 - e), C.paper);
+    ring(mx, my, 150 + E.outExpo(P(settle, .06, .9)) * 650, 10 * (1 - P(settle, .06, .9)), C.pink);
+    const fade = 1 - P(t, 14.2, 14.8);
+    for (const p of confetti) {
+      const tt = Math.min(settle, 1.6);
+      const x = mx - p.vx * (1 - Math.exp(-p.drag * tt * 2.2)) / (p.drag * 2.2);
+      const y = my + p.vy * (1 - Math.exp(-p.drag * tt * 2.2)) / (p.drag * 2.2) + 900 * tt * tt;
+      ctx.save(); ctx.translate(x, y); ctx.rotate(p.rot + p.vr * tt); ctx.scale(1, Math.cos(tt * 12 + p.rot));
+      ctx.globalAlpha = fade; ctx.fillStyle = p.c; ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h); ctx.restore();
+    }
+    ctx.globalAlpha = 1;
+  }
+  // wordmark rises in strips, right to left
+  const s = sprite('ريل الحركة', 170, C.paper), base = H / 2 + 215;
+  clipped(() => ctx.rect(0, base - s.asc, W, s.h), () => {
+    strips(s, W / 2, base, 30, k => {
+      const a = E.outExpo(P(t, SNAP + .05 + k * .014, SNAP + .7 + k * .014));
+      return { dy: (1 - a) * s.h, a: 1 };
+    });
+  });
+  const bar = E.inOutExpo(P(t, SNAP + .3, SNAP + .9));
+  ctx.fillStyle = C.sun; ctx.fillRect(W / 2 - 240 * bar, base + 50, 480 * bar, 6);
+  const sub = E.outCubic(P(t, SNAP + .5, SNAP + 1.2));
+  font(30, UI, 600); ctx.fillStyle = C.paper; ctx.globalAlpha = sub;
+  text('تصميم · تحريك · إخراج إبداعي', W / 2, base + 115 + (1 - sub) * 24, 'center');
+  ctx.globalAlpha = 1;
+}
+
+// ================= COMPOSITOR =================
+const diag = Math.hypot(W, H) / 2 + 40;
+function slantEdge(p) { // region to the left of a slanted edge sweeping left→right
+  const x = lerp(-500, W + 500, p), sk = 260;
+  ctx.moveTo(x - sk, 0); ctx.lineTo(-800, 0); ctx.lineTo(-800, H); ctx.lineTo(x + sk, H); ctx.closePath();
+}
+function compose(t) {
+  const cx = W / 2, cy = H / 2;
+  if (t < 1.38) return s1(t);
+  if (t < 1.95) {
+    s1(t);
+    const r = E.outExpo(P(t, 1.38, 1.95)) * diag;
+    clipped(() => ctx.arc(cx, cy, r, 0, TAU), () => s2(t));
+    ring(cx, cy, r + 30, 14 * (1 - P(t, 1.38, 1.95)), C.pink);
+    return;
+  }
+  if (t < 3.35) return s2(t);
+  if (t < 3.9) {
+    s2(t);
+    clipped(() => slantEdge(E.inOutExpo(P(t, 3.35, 3.8))), () => fill(C.pink));
+    clipped(() => slantEdge(E.inOutExpo(P(t, 3.45, 3.9))), () => s3(t));
+    return;
+  }
+  if (t < 5.85) return s3(t);
+  if (t < 6.3) {
+    s3(t);
+    const r = E.inOutExpo(P(t, 5.85, 6.3)) * diag;
+    clipped(() => ctx.arc(cx, cy, r, 0, TAU), () => s4(t));
+    return;
+  }
+  if (t < 8.05) return s4(t);
+  if (t < 8.5) {
+    s4(t);
+    const R = E.inExpo(P(t, 8.05, 8.5)) * 1500;
+    clipped(() => blobPath(cx, cy, R, 3, t * 1.3, 1.6), () => s5(t));
+    return;
+  }
+  if (t < 10.55) return s5(t);
+  if (t < 10.85) {
+    s5(t);
+    clipped(() => stripes(P(t, 10.55, 10.85), 11, .025), () => s6(t));
+    return;
+  }
+  if (t < 12.5) return s6(t);
+  if (t < 12.9) {
+    const r = (1 - E.inOutExpo(P(t, 12.5, 12.9))) * diag;
+    s7(t);
+    clipped(() => ctx.arc(cx, cy, r, 0, TAU), () => s6(t));
+    ring(cx, cy, r, 10, C.sun);
+    return;
+  }
+  s7(t);
+}
+
+// ---------- overlays ----------
+const vignette = (() => {
+  const g = ctx.createRadialGradient(W / 2, H / 2, H * .35, W / 2, H / 2, H * 1.05);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.42)'); return g;
+})();
+const LABELS = [[0, 'النشأة'], [1.6, 'الخط المتحرك'], [3.7, 'الأنظمة'], [6.1, 'الانسياب'], [8.3, 'الفضاء السريع'], [10.7, 'الإيقاع'], [12.7, 'التوقيع']];
+function hud(t, frame) {
+  ctx.globalCompositeOperation = 'difference';
+  ctx.fillStyle = '#fff'; ctx.strokeStyle = '#fff';
+  ctx.textBaseline = 'alphabetic';
+  let si = 0; for (let i = 0; i < LABELS.length; i++) if (t >= LABELS[i][0]) si = i;
+  font(22, UI, 600);
+  text('ريل الحركة — الإصدار ٢٦', W - 64, 76);
+  font(22, UI, 600); ctx.direction = 'rtl';
+  const lw = ctx.measureText(LABELS[si][1]).width;
+  text(LABELS[si][1], W - 64, H - 50);
+  font(20, MONO, 500); text(`0${si + 1} / 07`, W - 64 - lw - 22, H - 51, 'right', 'ltr');
+  const f = frame % FPS, s = Math.floor(frame / FPS);
+  text(`00:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`, 64, 74, 'left', 'ltr');
+  text('1920×1080 · 60 FPS', 64, H - 52, 'left', 'ltr');
+  ctx.lineWidth = 2;
+  for (const [x, y, dx, dy] of [[36, 36, 1, 1], [W - 36, 36, -1, 1], [36, H - 36, 1, -1], [W - 36, H - 36, -1, -1]]) {
+    ctx.beginPath(); ctx.moveTo(x, y + dy * 22); ctx.lineTo(x, y); ctx.lineTo(x + dx * 22, y); ctx.stroke();
+  }
+  // progress fills right to left
+  const pw = (W - 128) * (t / DUR);
+  ctx.globalAlpha = .3; ctx.fillRect(64, H - 34, W - 128, 2);
+  ctx.globalAlpha = 1; ctx.fillRect(W - 64 - pw, H - 34, pw, 2);
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function render(t) {
+  const frame = Math.round(t * FPS);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.direction = 'ltr';
+  ctx.fillStyle = C.ink; ctx.fillRect(0, 0, W, H);
+  const sh = shake(t);
+  ctx.save();
+  const sc = 1 + sh.amp * 2.4 / H;
+  ctx.translate(W / 2 + sh.x, H / 2 + sh.y); ctx.scale(sc, sc); ctx.translate(-W / 2, -H / 2);
+  compose(t);
+  ctx.restore();
+  const f = E.inCubic(P(t, 14.55, 15));
+  if (f > 0) { ctx.globalAlpha = f; ctx.fillStyle = C.ink; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
+  ctx.fillStyle = vignette; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = .09;
+  ctx.fillStyle = ctx.createPattern(grain[frame % grain.length], 'repeat');
+  ctx.save(); ctx.translate((frame * 37) % 256, (frame * 91) % 256); ctx.fillRect(-256, -256, W + 512, H + 512); ctx.restore();
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+  hud(t, frame);
+}
+
+// ---------- playback ----------
+window.reelReady = Promise.all(window.REEL_FONTS.map(([f, s]) => document.fonts.load(f, s))).catch(() => {}).then(() => sprites.clear());
+window.renderFrame = i => render(i / FPS);
+const capture = /capture/.test(location.hash);
+if (capture) { document.body.classList.add('capture'); return; }
+
+const playBtn = document.getElementById('play'), scrub = document.getElementById('scrub'), tc = document.getElementById('tc');
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let playing = !reduce, t0 = performance.now(), cur = reduce ? 13.9 : 0;
+function setPlaying(p) { playing = p; playBtn.textContent = p ? 'إيقاف' : 'تشغيل'; t0 = performance.now() - cur * 1000; }
+playBtn.addEventListener('click', () => setPlaying(!playing));
+scrub.addEventListener('input', () => { cur = scrub.value / FPS; t0 = performance.now() - cur * 1000; render(cur); tc.textContent = cur.toFixed(2) + 's'; });
+function loop(now) {
+  if (playing) { cur = ((now - t0) / 1000) % DUR; render(cur); scrub.value = Math.round(cur * FPS); tc.textContent = cur.toFixed(2) + 's'; }
+  requestAnimationFrame(loop);
+}
+window.reelReady.then(() => { setPlaying(playing); render(cur); requestAnimationFrame(loop); });
+})();
+</script>

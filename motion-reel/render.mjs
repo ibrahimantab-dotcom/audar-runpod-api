@@ -1,16 +1,18 @@
-// Renders index.html frame-by-frame at 60 fps and encodes an H.264 MP4.
-// Usage: node render.mjs [out.mp4] [--frames 0,120,240]  (frames flag writes PNG stills instead)
+// Renders a reel page frame-by-frame at 60 fps and encodes an H.264 MP4.
+// Usage: node render.mjs [out.mp4] [--page ar.html] [--frames 0,120,240]  (frames flag writes PNG stills instead)
 import { chromium } from 'playwright';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const stillsIdx = args.indexOf('--frames');
-const out = args[0] && !args[0].startsWith('--') ? args[0] : path.join(here, 'motion-reel.mp4');
+const pageIdx = args.indexOf('--page');
+const pageFile = pageIdx >= 0 ? args[pageIdx + 1] : 'index.html';
+const defaultOut = pageFile === 'index.html' ? 'motion-reel.mp4' : `motion-reel-${path.basename(pageFile, '.html')}.mp4`;
+const out = args[0] && !args[0].startsWith('--') ? args[0] : path.join(here, defaultOut);
 const ffmpeg = process.env.FFMPEG || 'ffmpeg';
 
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || undefined });
@@ -21,10 +23,16 @@ await page.route(/fonts\.(googleapis|gstatic)\.com/, route => {
   const type = route.request().url().includes('googleapis') ? 'text/css' : 'font/woff2';
   route.fulfill({ body, contentType: type, headers: { 'access-control-allow-origin': '*' } });
 });
-await page.goto('file://' + path.join(here, 'index.html') + '#capture');
-const fontsOk = await page.evaluate(async () => (await document.fonts.load('400 100px Anton')).length > 0 && (await document.fonts.load("500 20px 'DM Mono'")).length > 0);
+await page.goto('file://' + path.join(here, pageFile) + '#capture');
+// Pages list the faces they need as [font, sample text]; the sample pulls in the right unicode-range subset.
+const fontsOk = await page.evaluate(async () => {
+  const list = window.REEL_FONTS || [['400 100px Anton', 'MOTION'], ["500 20px 'DM Mono'", '0123']];
+  const loaded = await Promise.all(list.map(([f, s]) => document.fonts.load(f, s)));
+  await window.reelReady;
+  return loaded.every(faces => faces.length > 0);
+});
 if (!fontsOk) throw new Error('Fonts failed to load');
-console.log('Anton loaded:', fontsOk);
+console.log(`${pageFile}: fonts loaded`);
 
 async function grab(i) {
   await page.evaluate(i => window.renderFrame(i), i);
