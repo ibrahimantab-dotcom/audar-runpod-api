@@ -31,8 +31,8 @@ Every frame is a pure function of time (`renderFrame(i)`), so playback and expor
 
 | Sample | Format | File |
 |---|---|---|
-| YouTube channel intro ("بايت") | 16:9, 5 s | `sample-intro.mp4` |
-| Logo reveal ("محمصة نخلة") | 16:9, 4.5 s | `sample-logo.mp4` |
+| YouTube intro, gaming channel ("ليفل أب") | 16:9, 5.5 s | `sample-intro.mp4` |
+| Logo reveal, juice brand ("برد") | 16:9, 5 s | `sample-logo.mp4` |
 | Store ad ("متجر لمسة") | 9:16, 8 s | `sample-ad.mp4` |
 | Gig cover image | 1280×720 | `sample-cover.png` |
 
