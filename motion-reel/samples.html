@@ -1,0 +1,556 @@
+<title>نماذج خدمات الموشن</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Lalezar&family=IBM+Plex+Sans+Arabic:wght@500;600&family=DM+Mono:wght@500&display=swap">
+<style>
+  /* Layout: tab row of sample types, the stage sized to each sample's own aspect ratio, a transport bar beneath. Single dark look by choice. */
+  :root {
+    --field: #07060F;
+    --ink: #0E0D1A;
+    --paper: #F2EDFF;
+    --pink: #FF2E88;
+    --sun: #FFC62B;
+    --muted: #8C87A8;
+    --line: #2A2740;
+    --ui: 'IBM Plex Sans Arabic', Tahoma, sans-serif;
+    --mono: 'DM Mono', ui-monospace, Menlo, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--field);
+    color: var(--paper);
+    font-family: var(--ui);
+    margin: 0;
+    padding-inline: 16px;
+    padding-block: 14px;
+    box-sizing: border-box;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    gap: 12px;
+    overflow: hidden;
+  }
+  .tabs { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+  .tabs button {
+    font: inherit; font-size: 14px; font-weight: 600; color: var(--muted); background: transparent;
+    border: 1px solid var(--line); border-radius: 999px; padding: 6px 16px; cursor: pointer;
+  }
+  .tabs button[aria-selected="true"] { color: var(--ink); background: var(--sun); border-color: var(--sun); }
+  .tabs button:hover { color: var(--paper); border-color: var(--muted); }
+  .tabs button[aria-selected="true"]:hover { color: var(--ink); }
+  .stage { min-height: 0; display: grid; place-items: center; }
+  canvas {
+    display: block; max-width: 100%; max-height: 100%; width: auto; height: auto;
+    background: var(--ink); border-radius: 6px;
+  }
+  .bar { display: flex; align-items: center; gap: 14px; font-size: 14px; color: var(--muted); width: min(100%, 900px); justify-self: center; }
+  .bar button {
+    font: inherit; font-weight: 600; color: var(--paper); background: transparent; border: 1px solid var(--muted);
+    border-radius: 999px; padding: 5px 16px; cursor: pointer;
+  }
+  .bar button:hover { border-color: var(--paper); }
+  button:focus-visible, #scrub:focus-visible { outline: 2px solid var(--sun); outline-offset: 2px; }
+  #scrub { flex: 1; min-width: 0; accent-color: var(--pink); direction: rtl; }
+  #tc { font-family: var(--mono); font-variant-numeric: tabular-nums; min-width: 12ch; text-align: left; }
+  #meta { font-size: 13px; }
+  body.capture { padding: 0; display: block; background: var(--ink); }
+  body.capture .tabs, body.capture .bar { display: none; }
+  body.capture canvas { max-width: none; max-height: none; border-radius: 0; }
+</style>
+
+<nav class="tabs" dir="rtl" role="tablist" aria-label="نوع النموذج">
+  <button id="tab-intro" type="button" role="tab" data-mode="intro">إنترو يوتيوب</button>
+  <button id="tab-logo" type="button" role="tab" data-mode="logo">ظهور شعار</button>
+  <button id="tab-ad" type="button" role="tab" data-mode="ad">إعلان متجر</button>
+  <button id="tab-cover" type="button" role="tab" data-mode="cover">غلاف الخدمة</button>
+</nav>
+<div class="stage"><canvas id="c" width="1920" height="1080" aria-label="نموذج موشن جرافيك"></canvas></div>
+<div class="bar" dir="rtl">
+  <button id="play" type="button">إيقاف</button>
+  <input id="scrub" type="range" min="0" max="300" step="1" value="0" aria-label="التنقل في الخط الزمني">
+  <span id="meta"></span>
+  <span id="tc" dir="ltr">0.00s</span>
+</div>
+
+<script>
+(() => {
+'use strict';
+const FPS = 60, TAU = Math.PI * 2;
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W = 1920, H = 1080;
+
+const DISPLAY = "Lalezar, 'Noto Kufi Arabic', Tahoma, sans-serif";
+const UI = "'IBM Plex Sans Arabic', Tahoma, sans-serif";
+const MONO = "'DM Mono', ui-monospace, Menlo, monospace";
+window.REEL_FONTS = [["400 100px Lalezar", 'حركة ٠١٢٣٤٥٦٧٨٩٪'], ["600 20px 'IBM Plex Sans Arabic'", 'حركة ٠١٢٣'], ["500 20px 'DM Mono'", '0123:']];
+const AR_DIGITS = '٠١٢٣٤٥٦٧٨٩';
+const ar = s => String(s).replace(/[0-9]/g, d => AR_DIGITS[d]);
+
+// ---------- math ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+const P = (t, a, b) => clamp((t - a) / (b - a));
+const E = {
+  outExpo: t => t >= 1 ? 1 : 1 - Math.pow(2, -10 * t),
+  inExpo: t => t <= 0 ? 0 : Math.pow(2, 10 * t - 10),
+  inOutExpo: t => t <= 0 ? 0 : t >= 1 ? 1 : t < .5 ? Math.pow(2, 20 * t - 10) / 2 : (2 - Math.pow(2, -20 * t + 10)) / 2,
+  outBack: t => { const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); },
+  outElastic: t => t <= 0 ? 0 : t >= 1 ? 1 : Math.pow(2, -10 * t) * Math.sin((t * 10 - .75) * (TAU / 3)) + 1,
+  inOutCubic: t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+  outCubic: t => 1 - Math.pow(1 - t, 3),
+  inCubic: t => t * t * t,
+};
+function rng(seed) {
+  return () => {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ---------- drawing helpers ----------
+function fill(c) { ctx.fillStyle = c; ctx.fillRect(-200, -200, W + 400, H + 400); }
+function circle(x, y, r, c) { if (r <= 0) return; ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
+function ring(x, y, r, lw, c) { if (r <= 0 || lw <= 0) return; ctx.strokeStyle = c; ctx.lineWidth = lw; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.stroke(); }
+function clipped(path, draw) { ctx.save(); ctx.beginPath(); path(); ctx.clip(); draw(); ctx.restore(); }
+function font(px, fam = DISPLAY, w = 400) { ctx.font = `${w} ${px}px ${fam}`; }
+function text(str, x, y, align = 'right', dir = 'rtl') {
+  ctx.direction = dir; ctx.textAlign = align; ctx.fillText(str, x, y);
+  ctx.direction = 'ltr'; ctx.textAlign = 'left';
+}
+function measure(str) { ctx.direction = 'rtl'; const w = ctx.measureText(str).width; ctx.direction = 'ltr'; return w; }
+function star(x, y, rOut, rIn, n, rot, c) {
+  ctx.fillStyle = c; ctx.beginPath();
+  for (let i = 0; i < n * 2; i++) { const r = i % 2 ? rIn : rOut, a = rot + i / (n * 2) * TAU; ctx.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); }
+  ctx.closePath(); ctx.fill();
+}
+// Arabic words are rendered whole into sprites and animated as vertical strips, so letters stay joined.
+const sprites = new Map();
+function sprite(str, px, color, fam = DISPLAY) {
+  const key = str + px + color + fam;
+  if (sprites.has(key)) return sprites.get(key);
+  font(px, fam); ctx.direction = 'rtl'; ctx.textAlign = 'left';
+  const m = ctx.measureText(str);
+  const pad = Math.ceil(px * .08);
+  const asc = Math.ceil(m.actualBoundingBoxAscent) + pad, desc = Math.ceil(m.actualBoundingBoxDescent) + pad;
+  const w = Math.ceil(m.actualBoundingBoxLeft + m.actualBoundingBoxRight) + pad * 2;
+  const c = document.createElement('canvas'); c.width = w; c.height = asc + desc;
+  const g = c.getContext('2d');
+  g.font = `400 ${px}px ${fam}`; g.direction = 'rtl'; g.textAlign = 'left'; g.fillStyle = color;
+  g.fillText(str, pad + m.actualBoundingBoxLeft, asc);
+  ctx.direction = 'ltr';
+  const s = { c, w, h: asc + desc, asc };
+  sprites.set(key, s); return s;
+}
+function strips(s, cx, y, n, fn) {
+  const sw = s.w / n, x0 = cx - s.w / 2;
+  for (let i = 0; i < n; i++) {
+    const o = fn(n - 1 - i, n); if (!o || o.a <= 0) continue;
+    ctx.globalAlpha = o.a;
+    ctx.drawImage(s.c, i * sw, 0, sw + .6, s.h, x0 + i * sw + (o.dx || 0), y - s.asc + (o.dy || 0), sw + .6, s.h);
+  }
+  ctx.globalAlpha = 1;
+}
+// Rise a word up from behind its own baseline, right to left.
+function riseWord(s, cx, y, t, start, n = 14, stagger = .022, dur = .6) {
+  clipped(() => ctx.rect(0, y - s.asc, W, s.h), () => strips(s, cx, y, n, k => {
+    const a = E.outExpo(P(t, start + k * stagger, start + k * stagger + dur));
+    return { dy: (1 - a) * s.h, a: 1 };
+  }));
+}
+
+const grain = Array.from({ length: 6 }, (_, k) => {
+  const g = document.createElement('canvas'); g.width = g.height = 256;
+  const gx = g.getContext('2d'); const id = gx.createImageData(256, 256); const r = rng(500 + k);
+  for (let i = 0; i < id.data.length; i += 4) { const v = r() * 255 | 0; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255; }
+  gx.putImageData(id, 0, 0); return g;
+});
+function finish(frame, grainAlpha = .07) {
+  const g = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * .35, W / 2, H / 2, Math.max(W, H) * .75);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,.38)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = grainAlpha;
+  ctx.fillStyle = ctx.createPattern(grain[frame % grain.length], 'repeat');
+  ctx.save(); ctx.translate((frame * 37) % 256, (frame * 91) % 256); ctx.fillRect(-256, -256, W + 512, H + 512); ctx.restore();
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+}
+function shakeAt(t, hits) {
+  let x = 0, y = 0, amp = 0;
+  for (const [h, A] of hits) {
+    const d = t - h; if (d < 0 || d > .6) continue;
+    const a = A * Math.exp(-d * 11);
+    x += a * Math.sin(d * 95 + h * 7); y += a * Math.cos(d * 81 + h * 3); amp += a;
+  }
+  return { x, y, amp };
+}
+function withShake(t, hits, draw) {
+  const sh = shakeAt(t, hits);
+  ctx.save();
+  const sc = 1 + sh.amp * 2.4 / Math.min(W, H);
+  ctx.translate(W / 2 + sh.x, H / 2 + sh.y); ctx.scale(sc, sc); ctx.translate(-W / 2, -H / 2);
+  draw(); ctx.restore();
+}
+
+// =====================================================================
+// 1 · YouTube channel intro — fictional tech channel "بايت" (5 s, 16:9)
+// =====================================================================
+const I = { ink: '#0B0C1F', blue: '#3D5AFE', mint: '#2BF5C0', pink: '#FF2E88', paper: '#F2EDFF', red: '#FF3040', gray: '#3A3B55' };
+function bell(x, y, s, rot, c) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.scale(s, s); ctx.fillStyle = c;
+  ctx.beginPath(); ctx.moveTo(-18, 12); ctx.quadraticCurveTo(-18, -20, 0, -22); ctx.quadraticCurveTo(18, -20, 18, 12);
+  ctx.lineTo(24, 18); ctx.lineTo(-24, 18); ctx.closePath(); ctx.fill();
+  circle(0, 24, 6, c); circle(0, -24, 4, c); ctx.restore();
+}
+function cursorArrow(x, y, s) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 46); ctx.lineTo(12, 35); ctx.lineTo(21, 54); ctx.lineTo(29, 50); ctx.lineTo(20, 32); ctx.lineTo(36, 32); ctx.closePath();
+  ctx.fillStyle = '#fff'; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = I.ink; ctx.stroke(); ctx.restore();
+}
+function intro(t) {
+  fill(I.ink);
+  // grid backdrop
+  ctx.strokeStyle = 'rgba(242,237,255,.05)'; ctx.lineWidth = 1;
+  for (let x = 0; x < W; x += 80) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = 0; y < H; y += 80) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  // glitch bars sweep in from the right and out to the left
+  const bars = [I.blue, I.mint, I.pink, I.paper, I.blue, I.mint];
+  for (let i = 0; i < bars.length; i++) {
+    const a = E.outExpo(P(t, i * .05, i * .05 + .35)), o = E.inExpo(P(t, .5 + i * .04, .8 + i * .04));
+    const y = H * (.12 + i * .135), h = H * (i % 2 ? .05 : .09);
+    const x1 = W, x0 = W * (1 - a), cut = W * o;
+    ctx.fillStyle = bars[i]; ctx.fillRect(x0 - cut * 0, y, Math.max(0, (x1 - x0) * (1 - o)), h);
+  }
+  const SNAP = .62, CLICK = 3.55;
+  // mark + name layout
+  const name = sprite('بايت', 230, I.paper);
+  const MS = 230, gap = 64, groupW = MS + gap + name.w;
+  const slide = E.inOutExpo(P(t, 1.2, 1.75));
+  const markX = lerp(W / 2, W / 2 + groupW / 2 - MS / 2, slide), markY = H / 2 - 70;
+  const pop = E.outBack(P(t, SNAP - .1, SNAP + .45));
+  if (pop > 0) {
+    ring(markX, markY, MS * .6 + E.outExpo(P(t, SNAP, SNAP + .7)) * 420, 16 * (1 - P(t, SNAP, SNAP + .7)), I.mint);
+    ctx.save(); ctx.translate(markX, markY); ctx.rotate((1 - pop) * -Math.PI / 2); ctx.scale(pop, pop);
+    ctx.fillStyle = I.blue; ctx.beginPath(); ctx.roundRect(-MS / 2, -MS / 2, MS, MS, 60); ctx.fill();
+    ctx.fillStyle = I.paper; ctx.beginPath(); ctx.moveTo(-30, -52); ctx.lineTo(58, 0); ctx.lineTo(-30, 52); ctx.closePath();
+    ctx.lineJoin = 'round'; ctx.lineWidth = 18; ctx.strokeStyle = I.paper; ctx.stroke(); ctx.fill();
+    ctx.restore();
+  }
+  const nameCx = markX - MS / 2 - gap - name.w / 2;
+  riseWord(name, nameCx, markY + 80, t, 1.45, 12, .02, .55);
+  const tg = E.outCubic(P(t, 1.9, 2.4));
+  ctx.globalAlpha = tg; ctx.fillStyle = I.mint; font(46, UI, 600);
+  text('تقنية ببساطة · كل أحد', markX - MS / 2 - gap, markY + 150 + (1 - tg) * 20, 'right');
+  ctx.globalAlpha = 1;
+  // subscribe pill + cursor click
+  const pin = E.outBack(P(t, 2.55, 2.95));
+  if (pin > 0) {
+    const px = W / 2, py = H - 210, clicked = t >= CLICK;
+    const press = 1 - .08 * Math.sin(P(t, CLICK - .06, CLICK + .12) * Math.PI);
+    ctx.save(); ctx.translate(px, py + (1 - pin) * 160); ctx.scale(pin * press, pin * press);
+    ctx.fillStyle = clicked ? I.gray : I.red; ctx.beginPath(); ctx.roundRect(-220, -52, 440, 104, 52); ctx.fill();
+    ctx.fillStyle = I.paper; font(clicked ? 46 : 54);
+    text(clicked ? 'تم الاشتراك' : 'اشترك', 36, 18, 'center');
+    const d = t - CLICK;
+    bell(-150, 0, 1.1, d > 0 ? Math.sin(d * 38) * Math.exp(-d * 4) * .6 : 0, I.paper);
+    ctx.restore();
+    if (t > CLICK) {
+      const r = E.outExpo(P(t, CLICK, CLICK + .6));
+      ring(px + 40, py + 10, 20 + r * 160, 8 * (1 - r), I.paper);
+    }
+    const c = E.inOutCubic(P(t, 2.85, CLICK - .05));
+    cursorArrow(lerp(W * .78, px + 40, c), lerp(H + 60, py + 6, c), 1.2 * (t > CLICK - .06 && t < CLICK + .1 ? .88 : 1));
+  }
+  const out = E.inCubic(P(t, 4.45, 5));
+  if (out > 0) { ctx.globalAlpha = out; fill(I.ink); ctx.globalAlpha = 1; }
+}
+
+// =====================================================================
+// 2 · Logo reveal — fictional roastery "محمصة نخلة" (4.5 s, 16:9)
+// =====================================================================
+const L = { bg: '#1E120D', bg2: '#2E1C14', cream: '#F3E6D3', caramel: '#C8894A', leaf: '#8DB07A' };
+const dust = (() => { const r = rng(12); return Array.from({ length: 70 }, () => ({ x: r(), y: r(), s: 1 + r() * 3, v: .02 + r() * .05, p: r() * TAU })); })();
+function drawOn(path, p, lw, color, len = 1400) {
+  if (p <= 0) return;
+  ctx.save(); ctx.setLineDash([len * p, len]); ctx.lineWidth = lw; ctx.strokeStyle = color; ctx.lineCap = 'round';
+  ctx.beginPath(); path(); ctx.stroke(); ctx.restore();
+}
+function logo(t) {
+  const g = ctx.createRadialGradient(W / 2, H / 2 - 80, 50, W / 2, H / 2, W * .6);
+  g.addColorStop(0, L.bg2); g.addColorStop(1, L.bg);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  for (const d of dust) {
+    const y = ((d.y - t * d.v) % 1 + 1) % 1;
+    ctx.globalAlpha = .25 + .2 * Math.sin(t * 2 + d.p);
+    circle(d.x * W + Math.sin(t + d.p) * 12, y * H, d.s, L.caramel);
+  }
+  ctx.globalAlpha = 1;
+  const cx = W / 2, cy = H / 2 - 110, R = 170;
+  // outer ring draws on, counter-clockwise from the top
+  drawOn(() => ctx.arc(cx, cy, R, -Math.PI / 2, -Math.PI / 2 - TAU, true), E.inOutCubic(P(t, .1, 1.0)), 6, L.cream, TAU * R + 2);
+  // bean
+  const bx = cx, by = cy + 34, rx = 58, ry = 86, rot = .38;
+  const beanPath = () => ctx.ellipse(bx, by, rx, ry, rot, 0, TAU);
+  // three fronds grow from behind the bean
+  const fronds = [[-1, .9], [0, 1.05], [1, .9]];
+  fronds.forEach(([d, len], i) => {
+    const p = E.outCubic(P(t, 1.5 + i * .08, 2.0 + i * .08));
+    if (p <= 0) return;
+    const ang = -Math.PI / 2 + d * 1.0, L2 = 135 * len * p;
+    const baseX = bx + 18 * Math.sin(rot) - 10, baseY = by - ry * Math.cos(rot) + 14;
+    ctx.save(); ctx.translate(baseX + Math.cos(ang) * L2 / 2, baseY + Math.sin(ang) * L2 / 2); ctx.rotate(ang);
+    ctx.fillStyle = L.leaf; ctx.beginPath(); ctx.ellipse(0, 0, L2 / 2, 10 * p, 0, 0, TAU); ctx.fill();
+    ctx.restore();
+  });
+  const fillP = E.outBack(P(t, 1.15, 1.6));
+  if (fillP > 0) clipped(beanPath, () => circle(bx, by, 130 * fillP, L.caramel));
+  drawOn(beanPath, E.inOutCubic(P(t, .45, 1.2)), 6, L.cream, 480);
+  const crease = () => {
+    const c = Math.cos(rot), s = Math.sin(rot);
+    const pt = (x, y) => [bx + x * c - y * s, by + x * s + y * c];
+    ctx.moveTo(...pt(0, -ry + 8)); ctx.bezierCurveTo(...pt(-34, -30), ...pt(34, 30), ...pt(0, ry - 8));
+  };
+  drawOn(crease, E.inOutCubic(P(t, 1.35, 1.8)), 10, L.bg, 220);
+  // light sheen across the mark
+  const sh = P(t, 2.1, 2.75);
+  if (sh > 0 && sh < 1) clipped(() => ctx.arc(cx, cy, R - 4, 0, TAU), () => {
+    ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = .55; ctx.fillStyle = '#fff';
+    const x = lerp(cx - 300, cx + 300, E.inOutCubic(sh));
+    ctx.beginPath(); ctx.moveTo(x - 40, cy - R); ctx.lineTo(x + 40, cy - R); ctx.lineTo(x - 40, cy + R); ctx.lineTo(x - 120, cy + R); ctx.closePath(); ctx.fill();
+    ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  });
+  // wordmark + tagline
+  const nm = sprite('محمصة نخلة', 130, L.cream);
+  riseWord(nm, cx, cy + R + 175, t, 1.95, 22, .016, .6);
+  const tg = E.outCubic(P(t, 2.55, 3.1));
+  const lineW = 150 * E.inOutExpo(P(t, 2.5, 3.1));
+  ctx.fillStyle = L.caramel; font(36, UI, 600); ctx.globalAlpha = tg;
+  const tt = 'قهوة مختصة · تحميص يومي', tw = measure(tt);
+  text(tt, cx, cy + R + 250, 'center');
+  ctx.globalAlpha = 1;
+  ctx.fillRect(cx + tw / 2 + 30, cy + R + 238, lineW, 3);
+  ctx.fillRect(cx - tw / 2 - 30 - lineW, cy + R + 238, lineW, 3);
+}
+
+// =====================================================================
+// 3 · Store ad — fictional perfume shop "متجر لمسة" (8 s, 9:16 vertical)
+// =====================================================================
+const A = { plum: '#2B0F3A', plum2: '#45125A', pink: '#FF2E88', gold: '#FFC62B', paper: '#FFF4F8', violet: '#7B5CFF' };
+const sparkles = (() => { const r = rng(31); return Array.from({ length: 14 }, () => ({ x: .1 + r() * .8, y: .18 + r() * .5, s: 10 + r() * 22, p: r() * TAU })); })();
+function bottle(x, y, s, tilt) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(tilt); ctx.scale(s, s);
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.beginPath(); ctx.ellipse(0, 300, 190, 28, 0, 0, TAU); ctx.fill();
+  const g = ctx.createLinearGradient(-190, -170, 190, 280);
+  g.addColorStop(0, A.pink); g.addColorStop(1, A.violet);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.roundRect(-190, -170, 380, 450, 70); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.28)'; ctx.beginPath(); ctx.roundRect(-150, -130, 44, 360, 22); ctx.fill();
+  ctx.fillStyle = A.gold; ctx.fillRect(-58, -250, 116, 84);
+  ctx.fillStyle = A.paper; ctx.beginPath(); ctx.roundRect(-96, -370, 192, 128, 28); ctx.fill();
+  ctx.fillStyle = A.paper; ctx.beginPath(); ctx.roundRect(-120, -10, 240, 130, 14); ctx.fill();
+  ctx.fillStyle = A.plum; font(78); text('لمسة', 0, 82, 'center');
+  ctx.restore();
+}
+function ad(t) {
+  const cx = W / 2;
+  if (t < 1.5) {
+    fill(A.pink);
+    // outline echoes scrolling behind
+    font(260); ctx.strokeStyle = A.paper; ctx.lineWidth = 3; ctx.globalAlpha = .35;
+    ctx.direction = 'rtl'; ctx.textAlign = 'center';
+    for (let i = -3; i <= 3; i++) if (i) ctx.strokeText('تخفيضات', cx + (i % 2 ? 1 : -1) * t * 260, H / 2 + i * 250 + 90);
+    ctx.direction = 'ltr'; ctx.textAlign = 'left'; ctx.globalAlpha = 1;
+    const s = lerp(2.6, 1, E.outExpo(P(t, .05, .42)));
+    ctx.save(); ctx.translate(cx, H / 2); ctx.scale(s, s);
+    ctx.fillStyle = A.plum; font(260); text('تخفيضات', 0, 90, 'center');
+    ctx.restore();
+    const b = E.outBack(P(t, .45, .8));
+    if (b > 0) {
+      ctx.save(); ctx.translate(cx, H / 2 + 280); ctx.scale(b, b);
+      ctx.fillStyle = A.plum; ctx.beginPath(); ctx.roundRect(-250, -60, 500, 120, 60); ctx.fill();
+      ctx.fillStyle = A.gold; font(64); text('لفترة محدودة', 0, 24, 'center');
+      ctx.restore();
+    }
+  }
+  if (t >= 1.15) {
+    const r = E.inOutExpo(P(t, 1.15, 1.6)) * Math.hypot(W, H);
+    clipped(() => ctx.arc(cx, H / 2, r, 0, TAU), () => adMain(t));
+  }
+  if (t >= 6.6) {
+    const r = E.inOutExpo(P(t, 6.6, 7.05)) * Math.hypot(W, H);
+    clipped(() => ctx.arc(cx, 1650, r, 0, TAU), () => adEnd(t));
+  }
+}
+function adMain(t) {
+  const cx = W / 2;
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, A.plum2); g.addColorStop(1, A.plum);
+  ctx.fillStyle = g; ctx.fillRect(-200, -200, W + 400, H + 400);
+  // sunburst
+  ctx.save(); ctx.translate(cx, 820); ctx.rotate(t * .25); ctx.fillStyle = 'rgba(255,198,43,.07)';
+  for (let i = 0; i < 16; i++) { ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, 1400, i / 16 * TAU, i / 16 * TAU + TAU / 32); ctx.closePath(); ctx.fill(); }
+  ctx.restore();
+  // headline
+  const hl = sprite('عطر لمسة الجديد', 110, A.paper);
+  riseWord(hl, cx, 250, t, 1.45, 20, .015, .55);
+  const sub = E.outCubic(P(t, 1.9, 2.3));
+  ctx.globalAlpha = sub; ctx.fillStyle = A.pink; font(46, UI, 600);
+  text('ثبات يدوم طوال اليوم', cx, 335 + (1 - sub) * 16, 'center'); ctx.globalAlpha = 1;
+  // sparkles
+  for (const s of sparkles) {
+    const tw = Math.max(0, Math.sin(t * 3 + s.p)) * E.outCubic(P(t, 1.8, 2.3));
+    if (tw > 0) star(s.x * W, s.y * H + 120, s.s * tw, s.s * tw * .25, 4, t * .5, A.gold);
+  }
+  // product
+  const e = E.outBack(P(t, 1.35, 2.0));
+  bottle(cx, 880 + (1 - e) * 900 + Math.sin(t * 2.4) * 12, .95, Math.sin(t * 1.8) * .035 + (1 - e) * .3);
+  // -50% badge
+  const bp = E.outElastic(P(t, 2.1, 3.0));
+  if (bp > 0) {
+    ctx.save(); ctx.translate(cx + 300, 560); ctx.scale(bp, bp); ctx.rotate(-.18 + Math.sin(t * 2) * .05);
+    star(0, 0, 150, 124, 18, t * .4, A.gold);
+    ctx.fillStyle = A.plum; font(96); text('٥٠٪', 0, 22, 'center');
+    font(34, UI, 600); text('خصم', 0, 70, 'center');
+    ctx.restore();
+  }
+  // prices: old price struck, new price counts down
+  const pr = E.outCubic(P(t, 2.5, 2.9));
+  if (pr > 0) {
+    ctx.globalAlpha = pr;
+    ctx.fillStyle = 'rgba(255,244,248,.7)'; font(64, UI, 600);
+    const old = '٢٤٠ ر.س', ow = measure(old);
+    text(old, cx, 1330, 'center');
+    const st = E.inOutCubic(P(t, 2.9, 3.2));
+    ctx.fillStyle = A.pink; ctx.save(); ctx.translate(cx, 1308); ctx.rotate(-.08);
+    ctx.fillRect(ow / 2 + 10 - (ow + 20) * st, -5, (ow + 20) * st, 10); ctx.restore();
+    const n = Math.round(lerp(240, 120, E.outExpo(P(t, 3.1, 3.8))));
+    const pop = 1 + .12 * Math.sin(P(t, 3.75, 3.95) * Math.PI);
+    ctx.save(); ctx.translate(cx, 1500); ctx.scale(pop, pop);
+    ctx.fillStyle = A.gold; font(210); text(ar(n), 40, 0, 'center');
+    font(64, UI, 600); text('ر.س', -150, -10, 'center');
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+  // CTA
+  const cta = E.outBack(P(t, 4.1, 4.5));
+  if (cta > 0) {
+    const pulse = 1 + .035 * Math.sin((t - 4.5) * 9) * (t > 4.5 ? 1 : 0);
+    ctx.save(); ctx.translate(cx, 1690); ctx.scale(cta * pulse, cta * pulse);
+    ctx.fillStyle = A.gold; ctx.beginPath(); ctx.roundRect(-310, -78, 620, 156, 78); ctx.fill();
+    ctx.fillStyle = A.plum; font(84); text('اطلب الآن', 0, 30, 'center');
+    ctx.restore();
+    if (t > 4.6) {
+      const r = ((t - 4.6) % 1), g = r * 34;
+      ctx.strokeStyle = A.gold; ctx.lineWidth = 6 * (1 - r); ctx.beginPath(); ctx.roundRect(cx - 310 - g, 1612 - g, 620 + g * 2, 156 + g * 2, 78 + g); ctx.stroke();
+    }
+  }
+  const dl = E.outCubic(P(t, 4.6, 5.0));
+  ctx.globalAlpha = dl; ctx.fillStyle = A.paper; font(38, UI, 600);
+  text('العرض ينتهي الخميس · توصيل مجاني', cx, 1840, 'center'); ctx.globalAlpha = 1;
+}
+function adEnd(t) {
+  fill(A.pink);
+  const cx = W / 2;
+  ctx.save(); ctx.translate(cx, 860); ctx.rotate(t * .6); star(0, 0, 150, 60, 8, 0, A.gold); ctx.restore();
+  circle(cx, 860, 70, A.plum);
+  const nm = sprite('متجر لمسة', 170, A.plum);
+  riseWord(nm, cx, 1150, t, 6.95, 16, .018, .5);
+  const s = E.outCubic(P(t, 7.25, 7.6));
+  ctx.globalAlpha = s; ctx.fillStyle = A.paper; font(48, UI, 600);
+  text('الرابط في البايو', cx, 1250 + (1 - s) * 16, 'center'); ctx.globalAlpha = 1;
+}
+
+// =====================================================================
+// 4 · Gig cover image (single frame, 16:9)
+// =====================================================================
+const K = { ink: '#0E0D1A', paper: '#F2EDFF', sun: '#FFC62B', pink: '#FF2E88', blue: '#3D5AFE', mint: '#2BF5C0' };
+function cover() {
+  fill(K.ink);
+  ctx.strokeStyle = 'rgba(242,237,255,.05)'; ctx.lineWidth = 1;
+  for (let x = 0; x < W; x += 64) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = 0; y < H; y += 64) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  // left composition: the reel's mark with orbit
+  const mx = 300, my = 370;
+  ctx.setLineDash([4, 12]); ring(mx, my, 200, 2, 'rgba(242,237,255,.4)'); ctx.setLineDash([]);
+  [[0.6, K.sun], [2.4, K.pink], [4.1, K.mint]].forEach(([a, c]) => circle(mx + Math.cos(a) * 200, my + Math.sin(a) * 200, 12, c));
+  ctx.globalCompositeOperation = 'screen';
+  circle(mx + 50, my + 10, 80, K.sun);
+  ctx.fillStyle = K.pink; ctx.beginPath(); ctx.roundRect(mx - 125, my - 65, 150, 150, 18); ctx.fill();
+  ctx.fillStyle = K.blue; ctx.beginPath(); ctx.moveTo(mx, my - 125); ctx.lineTo(mx + 90, my + 30); ctx.lineTo(mx - 90, my + 30); ctx.closePath(); ctx.fill();
+  ctx.globalCompositeOperation = 'source-over';
+  // right: offer
+  const R = W - 70;
+  ctx.fillStyle = K.paper; font(96); text('موشن جرافيك', R, 210);
+  ctx.fillStyle = K.sun; text('بجودة عالية', R, 320);
+  ctx.fillStyle = K.mint; font(30, UI, 600); text('إنترو يوتيوب · ظهور شعار · إعلانات متاجر', R, 390);
+  // chips
+  const chips = ['٦٠ إطار/ث', 'عربي وإنجليزي', 'أفقي وعمودي'];
+  let x = R; font(24, UI, 600);
+  for (const c of chips) {
+    const w = measure(c) + 40;
+    ctx.strokeStyle = 'rgba(242,237,255,.5)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.roundRect(x - w, 440, w, 52, 26); ctx.stroke();
+    ctx.fillStyle = K.paper; text(c, x - w / 2, 475, 'center');
+    x -= w + 14;
+  }
+  ctx.fillStyle = K.pink; ctx.fillRect(R - 120, 560, 120, 6);
+  ctx.fillStyle = 'rgba(242,237,255,.6)'; font(22, UI, 500); text('شاهد النماذج في معرض الأعمال', R, 610);
+}
+
+// =====================================================================
+const MODES = {
+  intro: { w: 1920, h: 1080, dur: 5, draw: intro, hits: [[.62, 18], [3.55, 8]], meta: '16:9 · ٥ ثوانٍ' },
+  logo: { w: 1920, h: 1080, dur: 4.5, draw: logo, hits: [[1.15, 6]], meta: '16:9 · ٤٫٥ ثانية' },
+  ad: { w: 1080, h: 1920, dur: 8, draw: ad, hits: [[.3, 26], [2.4, 10], [3.8, 8]], meta: '9:16 · ٨ ثوانٍ' },
+  cover: { w: 1280, h: 720, dur: 0, draw: cover, hits: [], meta: 'صورة ١٢٨٠×٧٢٠' },
+};
+let mode = 'intro';
+function setMode(m) {
+  mode = MODES[m] ? m : 'intro';
+  const M = MODES[mode];
+  W = cv.width = M.w; H = cv.height = M.h;
+  window.REEL_FRAMES = Math.max(1, Math.round(M.dur * FPS));
+}
+function render(t) {
+  const M = MODES[mode], frame = Math.round(t * FPS);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.direction = 'ltr'; ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  withShake(t, M.hits, () => M.draw(t));
+  finish(frame, mode === 'cover' ? .05 : .07);
+}
+window.renderFrame = i => render(i / FPS);
+
+const capMatch = /capture-(\w+)/.exec(location.hash);
+setMode(capMatch ? capMatch[1] : location.hash.slice(1));
+window.reelReady = Promise.all(window.REEL_FONTS.map(([f, s]) => document.fonts.load(f, s))).catch(() => {}).then(() => sprites.clear());
+if (/capture/.test(location.hash)) { document.body.classList.add('capture'); return; }
+
+const playBtn = document.getElementById('play'), scrub = document.getElementById('scrub'), tc = document.getElementById('tc'), meta = document.getElementById('meta');
+const tabs = [...document.querySelectorAll('.tabs button')];
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let playing = !reduce, t0 = performance.now(), cur = 0;
+function syncUI() {
+  const M = MODES[mode];
+  tabs.forEach(b => b.setAttribute('aria-selected', String(b.dataset.mode === mode)));
+  meta.textContent = M.meta;
+  scrub.max = Math.max(1, Math.round(M.dur * FPS)); scrub.disabled = !M.dur; playBtn.disabled = !M.dur;
+}
+function pick(m) {
+  setMode(m); cur = reduce ? Math.max(0, MODES[mode].dur - .3) : 0; t0 = performance.now(); syncUI(); render(cur);
+}
+tabs.forEach(b => b.addEventListener('click', () => pick(b.dataset.mode)));
+function setPlaying(p) { playing = p; playBtn.textContent = p ? 'إيقاف' : 'تشغيل'; t0 = performance.now() - cur * 1000; }
+playBtn.addEventListener('click', () => setPlaying(!playing));
+scrub.addEventListener('input', () => { cur = scrub.value / FPS; t0 = performance.now() - cur * 1000; render(cur); tc.textContent = cur.toFixed(2) + 's'; });
+function loop(now) {
+  const M = MODES[mode];
+  if (playing && M.dur) {
+    cur = ((now - t0) / 1000) % (M.dur + .6);
+    const tt = Math.min(cur, M.dur - 1 / FPS);
+    render(tt); scrub.value = Math.round(tt * FPS); tc.textContent = tt.toFixed(2) + 's';
+  }
+  requestAnimationFrame(loop);
+}
+window.reelReady.then(() => { syncUI(); setPlaying(playing); render(cur); requestAnimationFrame(loop); });
+})();
+</script>

@@ -1,5 +1,6 @@
 // Renders a reel page frame-by-frame at 60 fps and encodes an H.264 MP4.
-// Usage: node render.mjs [out.mp4] [--page ar.html] [--frames 0,120,240]  (frames flag writes PNG stills instead)
+// Usage: node render.mjs [out.mp4] [--page ar.html] [--sample intro] [--frames 0,120,240]  (frames flag writes PNG stills instead)
+// Single-frame samples (the gig cover) are written as PNG.
 import { chromium } from 'playwright';
 import { spawn, execFileSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
@@ -10,8 +11,11 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
 const stillsIdx = args.indexOf('--frames');
 const pageIdx = args.indexOf('--page');
-const pageFile = pageIdx >= 0 ? args[pageIdx + 1] : 'index.html';
-const defaultOut = pageFile === 'index.html' ? 'motion-reel.mp4' : `motion-reel-${path.basename(pageFile, '.html')}.mp4`;
+const sampleIdx = args.indexOf('--sample');
+const sample = sampleIdx >= 0 ? args[sampleIdx + 1] : '';
+const pageFile = pageIdx >= 0 ? args[pageIdx + 1] : sample ? 'samples.html' : 'index.html';
+const defaultOut = sample ? `sample-${sample}.mp4`
+  : pageFile === 'index.html' ? 'motion-reel.mp4' : `motion-reel-${path.basename(pageFile, '.html')}.mp4`;
 const out = args[0] && !args[0].startsWith('--') ? args[0] : path.join(here, defaultOut);
 const ffmpeg = process.env.FFMPEG || 'ffmpeg';
 
@@ -23,7 +27,7 @@ await page.route(/fonts\.(googleapis|gstatic)\.com/, route => {
   const type = route.request().url().includes('googleapis') ? 'text/css' : 'font/woff2';
   route.fulfill({ body, contentType: type, headers: { 'access-control-allow-origin': '*' } });
 });
-await page.goto('file://' + path.join(here, pageFile) + '#capture');
+await page.goto('file://' + path.join(here, pageFile) + (sample ? `#capture-${sample}` : '#capture'));
 // Pages list the faces they need as [font, sample text]; the sample pulls in the right unicode-range subset.
 const fontsOk = await page.evaluate(async () => {
   const list = window.REEL_FONTS || [['400 100px Anton', 'MOTION'], ["500 20px 'DM Mono'", '0123']];
@@ -32,7 +36,8 @@ const fontsOk = await page.evaluate(async () => {
   return loaded.every(faces => faces.length > 0);
 });
 if (!fontsOk) throw new Error('Fonts failed to load');
-console.log(`${pageFile}: fonts loaded`);
+console.log(`${pageFile}${sample ? ' #' + sample : ''}: fonts loaded`);
+const total = await page.evaluate(() => window.REEL_FRAMES || 900);
 
 async function grab(i) {
   await page.evaluate(i => window.renderFrame(i), i);
@@ -42,10 +47,14 @@ async function grab(i) {
 
 if (stillsIdx >= 0) {
   for (const f of args[stillsIdx + 1].split(',').map(Number)) writeFileSync(path.join(process.env.STILLS || here, `frame_${String(f).padStart(3, '0')}.png`), await grab(f));
+} else if (total === 1) {
+  const png = out.replace(/\.mp4$/, '.png');
+  writeFileSync(png, await grab(0));
+  console.log('wrote', png);
 } else {
   const ff = spawn(ffmpeg, ['-y', '-f', 'image2pipe', '-framerate', '60', '-c:v', 'png', '-i', '-',
     '-c:v', 'libx264', '-preset', 'slow', '-crf', '23', '-pix_fmt', 'yuv420p', '-r', '60', '-movflags', '+faststart', out], { stdio: ['pipe', 'inherit', 'inherit'] });
-  for (let i = 0; i < 900; i++) {
+  for (let i = 0; i < total; i++) {
     const buf = await grab(i);
     if (!ff.stdin.write(buf)) await new Promise(r => ff.stdin.once('drain', r));
     if (i % 60 === 0) console.log('frame', i);
